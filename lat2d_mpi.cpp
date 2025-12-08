@@ -25,13 +25,13 @@ struct lat2d_mpi {
     std::span<int> right_bottom;
     std::span<int> right_top;
     std::span<int> halo;
-    std::vector<std::array<std::array<std::optional<size_t>, 2>, 2> > neighbors;
-    //neighbors[site][mu][dir] = site voisin en +mu si dir =0, -mu si dir =1
+    std::vector<std::array<std::array<std::optional<size_t>, 2>, 2> > neighbors; //neighbors[site][mu][dir] = site voisin en +mu si dir =0, -mu si dir =1
 
     explicit lat2d_mpi(int L_) {
         L = L_; //Taille de la lattice avec zones frozen
         V_active = (L - 2) * (L - 2); //Volume de la lattice de liens actifs
         links.resize(2 * V_active + 4 * 2 * (L - 2) + 4 * 2 + 2 * L);
+
         //Liens actifs + 4 frozen de taille 2*(L-2) + 4 coins de taille 2 + 1 halo de taille L
         size_t offset = 0;
         active = std::span(links.data() + offset, 2 * V_active);
@@ -115,6 +115,8 @@ struct lat2d_mpi {
         if (x == L - 1 && y == L - 1) {
             return V_active + 4 * (L - 2) + 3;
         }
+        std::cerr << "Invalid index" << std::endl;
+        return 1;
     }
 
     std::string print_links() {
@@ -211,7 +213,6 @@ int main(int argc, char *argv[]) {
         std::cout << "Shift vers la droite :" << std::endl;
         std::cout << lat.print_links() << std::endl;
     }
-
 
     //Fermeture MPI
     MPI_Finalize();
