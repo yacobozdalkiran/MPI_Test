@@ -503,6 +503,25 @@ struct lat4d {
         }
     }
 
+    void full_shift_n(int n, int mu, int c0, int cL, MPI_Comm comm) {
+        //Effectue n shifts dans la direction mu, c0 et cL sont resp. les sources et destinations de exchange_halos
+        MPI_Barrier(comm);
+        for (int i = 0; i < n; i++) {
+            fill_halo_send(mu, 1);
+            exchange_halos(c0, cL, comm);
+            shift_pos(mu);
+            fill_lattice_with_halo_rec(mu, 1);
+        }
+        MPI_Barrier(comm);
+    }
+
+    void full_shift_n_all_dirs(int n, int x0, int xL, int y0, int yL, int z0, int zL, int t0, int tL, MPI_Comm comm) {
+        full_shift_n(n, 0, x0, xL, comm);
+        full_shift_n(n, 1, y0, yL, comm);
+        full_shift_n(n, 2, z0, zL, comm);
+        full_shift_n(n, 3, t0, tL, comm);
+    }
+
     //Start
     void hot_start(std::mt19937_64 &gen) {
         for (size_t site = 0; site < V; site++) {
@@ -849,7 +868,7 @@ struct lat4d {
         std::array<SU3,6> list_staple;
 
         SU3 R = random_su3(rng);
-        std::cout << "beta = " << beta << std::endl;
+        //std::cout << "beta = " << beta << std::endl;
 
         int samples = 0;
         std::array<double,2> deltas = {0.0,0.0};
@@ -875,9 +894,9 @@ struct lat4d {
                     //On sample
                     theta_update = theta_sample - theta_parcouru_sample;
                     ecmc_update(site_current, mu_current, theta_update, epsilon_current, R);
-                    std::cout << "Sample " << samples << ", ";
+                    //std::cout << "Sample " << samples << ", ";
                     double plaq = local_mean_plaquette();
-                    std::cout << "<P> = " << plaq << ", " << event_counter << " events" << std::endl;
+                    //std::cout << "<P> = " << plaq << ", " << event_counter << " events" << std::endl;
                     //cout << "Q = " << topo_charge_clover(links, lat) << endl;
                     event_counter = 0;
                     meas_plaquette.emplace_back(plaq);
@@ -919,9 +938,9 @@ struct lat4d {
                     theta_update = theta_sample - theta_parcouru_sample;
                     ecmc_update(site_current, mu_current, theta_update, epsilon_current, R);
                     //On sample
-                    std::cout << "Sample " << samples << ", ";
+                    //std::cout << "Sample " << samples << ", ";
                     double plaq = local_mean_plaquette();
-                    std::cout << "<P> = " << plaq << ", " << event_counter << " events" << std::endl;
+                    //std::cout << "<P> = " << plaq << ", " << event_counter << " events" << std::endl;
                     //cout << "Q = " << topo_charge_clover(links, lat) << endl;
                     event_counter = 0;
                     meas_plaquette.emplace_back(plaq);
@@ -974,7 +993,30 @@ struct lat4d {
         }
         return meas_plaquette;
     }
+
 };
+
+void compute_plaquette_loc_glob(int rank, int size, lat4d &lat, MPI_Comm comm) {
+    MPI_Barrier(comm);
+    int x0, xL;
+    MPI_Cart_shift(comm, 0, 1, &x0, &xL);
+    int y0, yL;
+    MPI_Cart_shift(comm, 1, 1, &y0, &yL);
+    int z0, zL;
+    MPI_Cart_shift(comm, 2, 1, &z0, &zL);
+    int t0, tL;
+    MPI_Cart_shift(comm, 3, 1, &t0, &tL);
+
+    lat.fill_halo_obs(x0, xL, y0, yL, z0, zL, t0, tL, comm);
+    double l_plaquette = lat.local_mean_plaquette();
+    double g_plaquette;
+    MPI_Reduce(&l_plaquette, &g_plaquette, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
+    if (rank == 0) {
+        g_plaquette /= size;
+        std::cout << "Plaquette moyenne locale : " << lat.local_mean_plaquette() << std::endl;
+        std::cout << "Plaquette moyenne globale : " << g_plaquette << std::endl;
+    }
+}
 
 int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
@@ -1008,59 +1050,38 @@ int main(int argc, char **argv) {
 
 
     //On crée une lattice 4x4 hot start dans chaque noeud
-    lat4d lat(4);
-    lat.hot_start(gen);
-    //lat.cold_start();
+    int L = 6;
+    lat4d lat(L);
+    //lat.hot_start(gen);
+    lat.cold_start();
     if (rank == 0) {
-        std::cout << "Lattices créées, hot start\n";
+        std::cout << "Lattices créées, cold start\n";
     }
 
-    //ECMC
+    //ECMC params
     double beta = 6.0;
-    int N_samples = 100;
+    int N_samples = 3000;
     int param_theta_sample = 100;
     int param_theta_refresh = 20;
     bool poisson = 0;
     double epsilon_set = 0.15;
-    std::vector<double> meas_local = lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
 
-    //Calcul plaquette moyenne globale et locale avant shift
-    lat.fill_halo_obs(x0, xL, y0, yL, z0, zL, t0, tL, cart_comm);
-    double l_plaquette = lat.local_mean_plaquette();
-    double g_plaquette;
-    MPI_Reduce(&l_plaquette, &g_plaquette, 1, MPI_DOUBLE, MPI_SUM, 0, cart_comm);
+    //Initial plaquette
+    compute_plaquette_loc_glob(rank, size, lat, cart_comm);
 
-    if (rank == 0) {
-        g_plaquette /= size;
-        std::cout << "Plaquette moyenne locale : " << lat.local_mean_plaquette() << std::endl;
-        std::cout << "Plaquette moyenne globale : " << g_plaquette << std::endl;
+    //ECMC
+    for (int shift = 0; shift < 3*L; shift++) {
+        std::cout << "ECMC...\n";
+        lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
+        //Calcul plaquette locale et globale
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        //Shift
+        if (rank == 0) {
+            std::cout << "Shifting...\n";
+        }
+        lat.full_shift_n_all_dirs(1, x0, xL, y0, yL, z0, zL, t0, tL, cart_comm);
     }
 
-    //Shift dans la direction +x
-    if (rank == 0) {
-        std::cout << "Shifting...\n";
-    }
-    lat.fill_halo_send(0, 1);
-    lat.exchange_halos(x0, xL, cart_comm);
-    lat.shift_pos(0);
-    lat.fill_lattice_with_halo_rec(0, 1);
-    if (rank == 0) {
-        std::cout << "Shifting done !\n";
-    }
-
-    //Calcul plaquette moyenne globale et locale après shift
-    lat.fill_halo_obs(x0, xL, y0, yL, z0, zL, t0, tL, cart_comm);
-    l_plaquette = lat.local_mean_plaquette();
-    g_plaquette = 0.0;
-    MPI_Reduce(&l_plaquette, &g_plaquette, 1, MPI_DOUBLE, MPI_SUM, 0, cart_comm);
-
-    if (rank == 0) {
-        g_plaquette /= size;
-        std::cout << "Plaquette moyenne locale : " << lat.local_mean_plaquette() << std::endl;
-        std::cout << "Plaquette moyenne globale : " << g_plaquette << std::endl;
-    }
-
-    //TODO: ECMC sur node
     MPI_Finalize();
     return 0;
 }
