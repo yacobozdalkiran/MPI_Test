@@ -13,12 +13,8 @@
 using SU3 = Eigen::Matrix3cd;
 using Complex = std::complex<double>;
 
-std::random_device rd;
-std::mt19937_64 gen(rd());
 
-//Observables
-
-
+//SU3 utils
 SU3 random_su3(std::mt19937_64 &rng) {
     //Génère une matrice de SU3 aléatoire uniformément selon la mesure de Haar en utilisant la décomposition QR
     std::normal_distribution<double> gauss(0.0, 1.0);
@@ -92,6 +88,17 @@ SU3 random_SU3_epsilon(double epsilon, std::mt19937_64 &rng) {
     M *= su2_quaternion_to_su3(x, 1,2);
 
     return M;
+}
+
+std::vector<SU3> metropolis_set(double epsilon, int size, std::mt19937_64 &rng) {
+    //Crée un set de matrices SU(3) epsilon-proches de l'identité de taille size avec leurs adjoints
+    std::vector<SU3> set(size+1);
+    set[0] = SU3::Identity();
+    for (int i = 1; i < size+1; i+=2) {
+        set[i] = random_SU3_epsilon(epsilon, rng);
+        set[i+1] = set[i].adjoint();
+    }
+    return set;
 }
 
 std::vector<SU3> ecmc_set(double epsilon, std::vector<SU3> &set, std::mt19937_64 &rng) {
@@ -269,8 +276,8 @@ struct lat4d {
         halo_t0.resize(V_halo * 4 * 9);
         halo_tL.resize(V_halo * 4 * 9);
         neighbors.resize(V);
-        frozen.resize(V * 4);
-        staples.resize(V*4);
+        frozen.resize(V);
+        staples.resize(V);
 
         for (int x = 0; x < L; x++) {
             for (int y = 0; y < L; y++) {
@@ -313,15 +320,18 @@ struct lat4d {
                             for (int nu = 0; nu < NDIMS; nu++) {
                                 if (nu == mu) continue;
 
-                                std::optional<size_t> xmu = neighbors[site][mu][0].value();
+                                size_t xmu = neighbors[site][mu][0].value(); //x+mu
+                                size_t xnu = neighbors[site][nu][0].value(); //x+nu
+                                size_t xmunu = neighbors[xmu][nu][1].value(); //x+mu-nu
+                                size_t xmnu = neighbors[site][nu][1].value(); //x-nu
 
-                                staples[site][mu][j][0] = {neighbors[site][mu][0], nu};
-                                staples[site][mu][j][1] = {neighbors[site][nu][0], mu};
+                                staples[site][mu][j][0] = {xmu, nu};
+                                staples[site][mu][j][1] = {xnu, mu};
                                 staples[site][mu][j][2] = {site, nu};
-                                if (xmu.has_value()) staples[site][mu][j + 1][0] = {neighbors[xmu.value()][nu][1], nu};
-                                else std::cerr << "Invalid acces during lat.staples construction \n";
-                                staples[site][mu][j + 1][1] = {neighbors[site][nu][1], mu};
-                                staples[site][mu][j + 1][2] = {neighbors[site][nu][1], nu};
+
+                                staples[site][mu][j + 1][0] = {xmunu, nu};
+                                staples[site][mu][j + 1][1] = {xmnu, mu};
+                                staples[site][mu][j + 1][2] = {xmnu, nu};
 
                                 j += 2;
                             }
@@ -344,27 +354,27 @@ struct lat4d {
 
     //Link access functions
     Eigen::Map<SU3> view_link(size_t site, int mu) {
-        return Eigen::Map<SU3>(&links[(site * 4 + mu) * 9]);
+        return Eigen::Map<SU3, Eigen::Unaligned>(&links[(site * 4 + mu) * 9]);
     }
 
     Eigen::Map<const SU3> view_link_const(size_t site, int mu) const {
-        return Eigen::Map<const SU3>(&links[(site * 4 + mu) * 9]);
+        return Eigen::Map<const SU3, Eigen::Unaligned>(&links[(site * 4 + mu) * 9]);
     }
 
     Eigen::Map<SU3> view_halo_send(size_t site, int mu) {
-        return Eigen::Map<SU3>(&halo_send[(site * 4 + mu) * 9]);
+        return Eigen::Map<SU3, Eigen::Unaligned>(&halo_send[(site * 4 + mu) * 9]);
     }
 
     Eigen::Map<const SU3> view_halo_send_const(size_t site, int mu) const {
-        return Eigen::Map<const SU3>(&halo_send[(site * 4 + mu) * 9]);
+        return Eigen::Map<const SU3, Eigen::Unaligned>(&halo_send[(site * 4 + mu) * 9]);
     }
 
     Eigen::Map<SU3> view_halo_rec(size_t site, int mu) {
-        return Eigen::Map<SU3>(&halo_rec[(site * 4 + mu) * 9]);
+        return Eigen::Map<SU3, Eigen::Unaligned>(&halo_rec[(site * 4 + mu) * 9]);
     }
 
     Eigen::Map<const SU3> view_halo_rec_const(size_t site, int mu) const {
-        return Eigen::Map<const SU3>(&halo_rec[(site * 4 + mu) * 9]);
+        return Eigen::Map<const SU3, Eigen::Unaligned>(&halo_rec[(site * 4 + mu) * 9]);
     }
 
     //Shift functions
@@ -541,6 +551,7 @@ struct lat4d {
 
     //Remplissage halo observables
     void fill_halo_obs(int x0, int xL, int y0, int yL, int z0, int zL, int t0, int tL, MPI_Comm comm) {
+        MPI_Barrier(comm);
         fill_halo_send(0, 0);
         MPI_Sendrecv(halo_send.data(), 2 * 9 * 4 * V_halo, MPI_DOUBLE, x0, 0, halo_xL.data(), 2 * 9 * 4 * V_halo,
                      MPI_DOUBLE, xL, 0, comm, MPI_STATUS_IGNORE);
@@ -581,10 +592,10 @@ struct lat4d {
             return view_link_const(site, mu);
         }
 
-        // hors domaine : on regarde laquelle coord est hors bornes (il n'y en aura au plus qu'une si on demande x+1 par ex)
+        // hors domaine : on regarde quelle coord est hors bornes (il n'y en aura au plus qu'une si on demande x+1 par ex)
         // pour chaque direction on mappe vers le halo correspondant en utilisant l'ordre (c1,c2,c3) attendu par index_halo
         if (x == -1) {
-            // face x0: halo_x0 stores sites ordered as (c1=y, c2=z, c3=t)
+            // face x0: halo_x0 (c1=y, c2=z, c3=t)
             size_t hidx = index_halo(y, z, t);
             return map_halo(halo_x0, hidx, mu);
         }
@@ -594,7 +605,7 @@ struct lat4d {
             return map_halo(halo_xL, hidx, mu);
         }
         if (y == -1) {
-            // face y0: halo_y0 stores (c1=x, c2=z, c3=t)
+            // face y0: halo_y0 s (c1=x, c2=z, c3=t)
             size_t hidx = index_halo(x, z, t);
             return map_halo(halo_y0, hidx, mu);
         }
@@ -621,7 +632,7 @@ struct lat4d {
             return map_halo(halo_tL, hidx, mu);
         }
 
-        // cas improbable : coordonnées sortent de ±1
+        // cas improbable : coordonnées sortent de +-1
         std::cerr << "get_link_at: coordinate out of expected range\n";
         return SU3::Identity();
     }
@@ -664,7 +675,7 @@ struct lat4d {
                                 if (nu == 2) zq = z + 1;
                                 if (nu == 3) tq = t + 1;
 
-                                // pour accéder, on autorise valeurs L (ces cas seront lus dans les halos)
+                                // pour accéder, on autorise valeurs L et -1 (ces cas seront lus dans les halos)
                                 auto U_mu = get_link_at(x, y, z, t, mu);
                                 auto U_nu_xmu = get_link_at(xp, yp, zp, tp, nu);
                                 auto U_mu_xnu = get_link_at(xq, yq, zq, tq, mu);
@@ -774,24 +785,26 @@ struct lat4d {
             P[3] = U3 * U0 * U1.adjoint() * U2.adjoint();
         }
         for (int i = 0; i < 4; i++) {
-            if (!frozen[links_plaquette_j[i].first][links_plaquette_j[i].second]) { //Seuls les liens actifs ont une proba non nulle
+            if (frozen[links_plaquette_j[i].first][links_plaquette_j[i].second]) {
+                probas[i] = 0.0;
+                sign_dS[i] = 0.0;
+                abs_dS[i] = 0.0;
+            }
+            else { //Seuls les liens actifs ont une proba non nulle
                 probas[i] = -(Complex(0.0, 1.0) * lambda_3 * R.adjoint() * P[i] * R).trace().real();
                 sign_dS[i] = dsign(probas[i]);
                 probas[i] = abs(probas[i]);
                 abs_dS[i] = probas[i];
                 sum += probas[i];
             }
-            else {
-                probas[i] = 0.0;
-                sign_dS[i] = 0.0;
-                abs_dS[i] = 0.0;
-            }
         }
         for (int i = 0; i < 4; i++) {
             probas[i] /= sum;
         }
-        int index_lift = selectVariable(probas, rng); //Donne forcément un lien non frozen car les autres ont proba 0.0
-
+        int index_lift = selectVariable(probas, rng); //Donne forcément un lien non frozen car les frozen ont proba 0.0
+        if (probas[index_lift] == 0.0) {
+            std::cerr << "Invalid lift (proba 0.0)\n";
+        }
         //On change le R
         std::uniform_int_distribution<size_t> distrib(0, set.size() - 1);
         std::uniform_real_distribution<double> uniform_0_1(0, 1);
@@ -840,7 +853,7 @@ struct lat4d {
                     Complex(0.0,0.0), Complex(0.0,0.0), Complex(0.0, 0.0);
 
         //Initialisation aléatoire de la position de la chaîne
-        size_t site_current = index(random_coord(gen), random_coord(gen), random_coord(gen), random_coord(gen));
+        size_t site_current = index(random_coord(rng), random_coord(rng), random_coord(rng), random_coord(rng));
         int mu_current = random_dir(rng);
         int epsilon_current = 2 * random_eps(rng) -1;
 
@@ -994,10 +1007,80 @@ struct lat4d {
         return meas_plaquette;
     }
 
+    //Metropolis
+    void compute_staple(size_t site, int mu, SU3 &staple) {
+        //Calcule la somme des staples sur un lien de jauge
+        staple.setZero();
+        for (int nu = 0; nu < 4; nu++) {
+            if (nu == mu) {
+                continue;
+            }
+            size_t x = site; //x
+            size_t xmu = neighbors[x][mu][0].value(); //x+mu
+            size_t xnu = neighbors[x][nu][0].value(); //x+nu
+            size_t xmunu = neighbors[xmu][nu][1].value(); //x+mu-nu
+            size_t xmnu = neighbors[x][nu][1].value(); //x-nu
+            auto U0 = view_link_const(xmu, nu);
+            auto U1 = view_link_const(xnu, mu);
+            auto U2 = view_link_const(x, nu);
+            staple += U0 * U1.adjoint() * U2.adjoint();
+            auto V0 = view_link_const(xmunu, nu);
+            auto V1 = view_link_const(xmnu, mu);
+            auto V2 = view_link_const(xmnu, nu);
+            staple += V0.adjoint() * V1.adjoint() * V2;
+        }
+    }
+
+    void metropolis_sweep(double beta, std::mt19937_64 &rng, const std::vector<SU3> &set, size_t &accepted, size_t &proposed, int n_hits) {
+        //Effectue un sweep metropolis avec n_hits hits à chaque lien.
+        SU3 staple;
+        SU3 Unew;
+        accepted = 0;
+        proposed = 0;
+        int i_set = 0;
+        std::uniform_int_distribution<int> index_set(0, static_cast<int>(set.size()) - 1);
+        std::uniform_real_distribution<double> unif(0.0, 1.0);
+        for (int x = 1; x<L-1; x++) {
+            for (int y = 1; y<L-1; y++) {
+                for (int z = 1; z<L-1; z++) {
+                    for (int t = 1; t<L-1; t++) {
+                        size_t site = index(x,y,z,t);
+                        for (int mu = 0; mu < 4; mu++) {
+                            //On copie la staple et Uold
+                            compute_staple(site, mu, staple);
+                            auto Umap = view_link(site, mu);
+                            SU3 Uold = Umap;
+
+                            for (int i =0; i < n_hits; i++) {
+                                //On choisit une matrice d'update dans set
+                                i_set = index_set(rng);
+
+                                //On copie Unew
+                                Unew = set[i_set] * Uold;
+
+                                //On propose le move
+                                double old_tr = (Uold * staple).trace().real();
+                                double new_tr = (Unew * staple).trace().real();
+                                double dS = -(beta/3.0) * (new_tr - old_tr);
+
+                                ++proposed;
+                                bool accept = false;
+                                if ((dS <= 0.0)||(unif(rng) < exp(-dS))) accept = true;
+
+                                if (accept) {
+                                    Umap.noalias() = Unew; //Unew et Umap ne se chevauchent pas -> safe
+                                    ++accepted;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 };
 
 void compute_plaquette_loc_glob(int rank, int size, lat4d &lat, MPI_Comm comm) {
-    MPI_Barrier(comm);
     int x0, xL;
     MPI_Cart_shift(comm, 0, 1, &x0, &xL);
     int y0, yL;
@@ -1007,22 +1090,28 @@ void compute_plaquette_loc_glob(int rank, int size, lat4d &lat, MPI_Comm comm) {
     int t0, tL;
     MPI_Cart_shift(comm, 3, 1, &t0, &tL);
 
+    MPI_Barrier(comm);
     lat.fill_halo_obs(x0, xL, y0, yL, z0, zL, t0, tL, comm);
     double l_plaquette = lat.local_mean_plaquette();
     double g_plaquette;
+    MPI_Barrier(comm);
     MPI_Reduce(&l_plaquette, &g_plaquette, 1, MPI_DOUBLE, MPI_SUM, 0, comm);
     if (rank == 0) {
         g_plaquette /= size;
-        std::cout << "Plaquette moyenne locale : " << lat.local_mean_plaquette() << std::endl;
-        std::cout << "Plaquette moyenne globale : " << g_plaquette << std::endl;
+        //std::cout << "Plaquette moyenne locale : " << lat.local_mean_plaquette() << std::endl;
+        std::cout << "<P> globale : " << g_plaquette << std::endl;
     }
 }
 
-int main(int argc, char **argv) {
+void in_main_MPI_Metropolis(int argc, char **argv) {
     MPI_Init(&argc, &argv);
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    //RNG
+    std::random_device rd;
+    std::mt19937_64 gen(rd()+rank);
 
     //Création de la topologie 4d
     int dims[4] = {2, 2, 2, 2};
@@ -1049,39 +1138,169 @@ int main(int argc, char **argv) {
     MPI_Cart_shift(cart_comm, 3, 1, &t0, &tL);
 
 
-    //On crée une lattice 4x4 hot start dans chaque noeud
+    //On crée une lattice dans chaque noeud
     int L = 6;
     lat4d lat(L);
     //lat.hot_start(gen);
     lat.cold_start();
     if (rank == 0) {
-        std::cout << "Lattices créées, cold start\n";
+        std::cout << "Lattices créées\n";
     }
 
-    //ECMC params
+    //Initial plaquette
+    compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+    //Metropolis params
     double beta = 6.0;
-    int N_samples = 3000;
-    int param_theta_sample = 100;
-    int param_theta_refresh = 20;
-    bool poisson = 0;
-    double epsilon_set = 0.15;
+    size_t accepted = 0;
+    size_t proposed = 0;
+    int n_hits = 10;
+    int n_sweeps = 100;
+    auto set = metropolis_set(0.15, 1000, gen);
+    int n_shift = 1;
+
+    //Metropolis boucle
+    double start = MPI_Wtime();
+    for (int shift = 0; shift < 10*L; shift++) {
+        //Calcul plaquette locale et globale
+        for (int sweeps = 0; sweeps < n_sweeps; sweeps++) {
+            lat.metropolis_sweep(beta, gen, set, accepted, proposed, n_hits);
+        }
+        //compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        //Shift
+        lat.full_shift_n(n_shift,0, x0, xL, cart_comm);
+        for (int sweeps = 0; sweeps < n_sweeps; sweeps++) {
+            lat.metropolis_sweep(beta, gen, set, accepted, proposed, n_hits);
+        }
+        //compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        lat.full_shift_n(n_shift,1, y0, yL, cart_comm);
+        for (int sweeps = 0; sweeps < n_sweeps; sweeps++) {
+            lat.metropolis_sweep(beta, gen, set, accepted, proposed, n_hits);
+        }
+        //compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        lat.full_shift_n(n_shift,2, z0, zL, cart_comm);
+        for (int sweeps = 0; sweeps < n_sweeps; sweeps++) {
+            lat.metropolis_sweep(beta, gen, set, accepted, proposed, n_hits);
+        }
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        lat.full_shift_n(n_shift,3, t0, tL, cart_comm);
+        set = metropolis_set(0.15, 1000, gen);
+    }
+    double end = MPI_Wtime();
+    double elapsed = end - start;
+    double elapsed_global;
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Reduce(&elapsed, &elapsed_global, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    if (rank==0) {
+        std::cout << "Elapsed time : " << elapsed_global << "s" << std::endl;
+    }
+
+    MPI_Finalize();
+}
+
+void in_main_MPI_ECMC(int argc, char **argv) {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    //RNG
+    std::random_device rd;
+    std::mt19937_64 gen(rd()+rank);
+
+    //Création de la topologie 4d
+    int dims[4] = {2, 2, 2, 2};
+    int period[4] = {1, 1, 1, 1};
+    int reorder = 1; //Autorise MPI a réordonner les rank pour optimiser
+    MPI_Comm cart_comm;
+    MPI_Cart_create(MPI_COMM_WORLD, 4, dims, period, reorder, &cart_comm);
+
+    //On récupère les coordonnées locales
+    int cart_rank;
+    MPI_Comm_rank(cart_comm, &cart_rank);
+    int coords[4];
+    MPI_Cart_coords(cart_comm, cart_rank, 4, coords);
+    //std::cout << "Rank " << rank << ", (" << coords[0] << ", " << coords[1] << ", " << coords[2] << ", " << coords[3] << ")" << std::endl;
+
+    //On récupère les rangs des voisins gauche et droite dans chaque direction
+    int x0, xL;
+    MPI_Cart_shift(cart_comm, 0, 1, &x0, &xL);
+    int y0, yL;
+    MPI_Cart_shift(cart_comm, 1, 1, &y0, &yL);
+    int z0, zL;
+    MPI_Cart_shift(cart_comm, 2, 1, &z0, &zL);
+    int t0, tL;
+    MPI_Cart_shift(cart_comm, 3, 1, &t0, &tL);
+
+
+    //On crée une lattice dans chaque noeud
+    int L = 10;
+    lat4d lat(L);
+    //lat.hot_start(gen);
+    lat.cold_start();
+    if (rank == 0) {
+        std::cout << "Lattices créées\n";
+    }
 
     //Initial plaquette
     compute_plaquette_loc_glob(rank, size, lat, cart_comm);
 
-    //ECMC
-    for (int shift = 0; shift < 3*L; shift++) {
-        std::cout << "ECMC...\n";
-        lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
-        //Calcul plaquette locale et globale
-        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
-        //Shift
-        if (rank == 0) {
-            std::cout << "Shifting...\n";
-        }
-        lat.full_shift_n_all_dirs(1, x0, xL, y0, yL, z0, zL, t0, tL, cart_comm);
-    }
+    //ECMC params
+    double beta = 4.0;
+    int N_samples = 1000;
+    int param_theta_sample = 1000;
+    int param_theta_refresh = 200;
+    bool poisson = 0;
+    double epsilon_set = 0.15;
 
+    //Boucle ECMC
+    double start = MPI_Wtime();
+    for (int shift = 0; shift < 10*L; shift++) {
+        lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        lat.full_shift_n(1, 0, x0, xL, cart_comm);
+        lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        lat.full_shift_n(1, 1, y0, yL, cart_comm);
+        lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        lat.full_shift_n(1, 2, z0, zL, cart_comm);
+        lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        lat.full_shift_n(1, 3, t0, tL, cart_comm);
+    }
+    double end = MPI_Wtime();
+    double elapsed = end - start;
+    double elapsed_global;
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_Reduce(&elapsed, &elapsed_global, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    if (rank==0) {
+        std::cout << "Elapsed time : " << elapsed_global << "s" << std::endl;
+    }
     MPI_Finalize();
+}
+
+void in_main_ECMC_debug() {
+    int L = 12;
+    lat4d lat(L);
+    lat.cold_start();
+
+    double beta = 6.0;
+    int N_samples = 5000;
+    int param_theta_sample = 1000;
+    int param_theta_refresh = 200;
+    bool poisson = 0;
+    double epsilon_set = 0.15;
+
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+
+    lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh, gen, poisson, epsilon_set);
+    std::cout << "<P> finale = " << lat.local_mean_plaquette() << std::endl;;
+}
+
+//TODO : Vérifier implémentation ECMC (shift validé par Metropolis) biais vient du lift ?
+//TODO : Vérifier ergodicité selon le shift et la taille de la lattice
+int main(int argc, char **argv) {
+    in_main_MPI_ECMC(argc, argv);
     return 0;
 }
