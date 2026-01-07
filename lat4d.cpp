@@ -7,6 +7,8 @@
 #include <complex>
 #include <random>
 #include <optional>
+#include <format>
+#include <fstream>
 
 #define NDIMS 4
 
@@ -105,7 +107,7 @@ std::vector<SU3> ecmc_set(double epsilon, std::vector<SU3> &set, std::mt19937_64
     //Crée un set de matrices SU(3) epsilon-proches de l'identité de taille size avec leurs adjoints
     size_t size = set.size()-1;
     set[0] = SU3::Identity();
-    for (int i = 1; i < size+1; i+=2) {
+    for (size_t i = 1; i < size+1; i+=2) {
         set[i] = random_SU3_epsilon(epsilon, rng);
         set[i+1] = set[i].adjoint();
     }
@@ -139,6 +141,7 @@ void compute_reject(double A, double B, double &gamma, double &reject, int epsil
     //cout << "phi = " << phi << endl;
     double period = 0.0, p1 = 0.0, p2 = 0.0;
     std::array<double, 4> intervals = {0.0, 0.0, 2 * M_PI, 2 * M_PI};
+    int discarded = 0;
     if (phi < M_PI / 2.0) {
         //cout << "cas 1"<< endl;
         intervals[1] = M_PI / 2.0 + phi;
@@ -148,6 +151,7 @@ void compute_reject(double A, double B, double &gamma, double &reject, int epsil
         if ((p1 < 0) && (p2 < 0)) std::cerr << "Périodes négatives !" << std::endl;
         period = p1 + p2;
         //cout << "contrib periodique = " << period << endl;
+        discarded = std::floor(gamma / period);
         gamma = gamma - std::floor(gamma / period) * period;
         if (gamma > p1) {
             gamma -= p1;
@@ -181,6 +185,7 @@ void compute_reject(double A, double B, double &gamma, double &reject, int epsil
         if ((p1 < 0) && (p2 < 0)) std::cerr << "Périodes négatives !" << std::endl;
         period = p1 + p2;
         //cout << "contrib periodique = " << period << endl;
+        discarded = std::floor(gamma / period);
         gamma = gamma - std::floor(gamma / period) * period;
         if (gamma > p1) {
             gamma -= p1;
@@ -210,6 +215,7 @@ void compute_reject(double A, double B, double &gamma, double &reject, int epsil
         period = R * (sin(intervals[1] - phi) - sin(intervals[0] - phi));
         if (period < 0) std::cerr << "Période négative !" << std::endl;
         //cout << "contrib periodique = " << period << endl;
+        discarded = std::floor(gamma / period);
         gamma = gamma - std::floor(gamma / period) * period;
         double alpha = gamma / R + sin(intervals[0] - phi);
         double theta1 = fmod((phi + asin(alpha) + 2 * M_PI), 2 * M_PI);
@@ -220,6 +226,7 @@ void compute_reject(double A, double B, double &gamma, double &reject, int epsil
             reject = theta2;
         }
     }
+    reject += 2*M_PI*discarded;
 }
 
 int selectVariable(const std::vector<double> &probas, std::mt19937_64 &rng) {
@@ -356,7 +363,7 @@ struct lat4d {
     Eigen::Map<SU3> view_link(size_t site, int mu) {
         return Eigen::Map<SU3, Eigen::Unaligned>(&links[(site * 4 + mu) * 9]);
     }
-
+    // 'Space'
     Eigen::Map<const SU3> view_link_const(size_t site, int mu) const {
         return Eigen::Map<const SU3, Eigen::Unaligned>(&links[(site * 4 + mu) * 9]);
     }
@@ -651,14 +658,14 @@ struct lat4d {
 
     // Calcule la somme locale des plaquettes (sum ReTr(U_p)) et le nombre local de plaquettes comptées
     // Chaque site produit 6 plaquettes (mu<nu). On compte chaque plaquette une seule fois.
-    double local_mean_plaquette() const {
+    double local_mean_plaquette(int offset=0) const {
         double sum = 0.0;
         size_t count = 0;
 
-        for (int t = 0; t < L; ++t) {
-            for (int z = 0; z < L; ++z) {
-                for (int y = 0; y < L; ++y) {
-                    for (int x = 0; x < L; ++x) {
+        for (int t = offset; t < L-offset; ++t) {
+            for (int z = offset; z < L-offset; ++z) {
+                for (int y = offset; y < L-offset; ++y) {
+                    for (int x = offset; x < L-offset; ++x) {
                         // pour chaque paire mu<nu
                         for (int mu = 0; mu < NDIMS; ++mu) {
                             for (int nu = mu + 1; nu < NDIMS; ++nu) {
@@ -914,6 +921,7 @@ struct lat4d {
                     event_counter = 0;
                     meas_plaquette.emplace_back(plaq);
                     samples++;
+                    if (samples == N_samples) return meas_plaquette;
                     theta_parcouru_sample = 0;
                     if (poisson) theta_sample = random_theta_sample(rng); //On retire un nouveau theta_sample
                     theta_parcouru_refresh += theta_update;
@@ -958,6 +966,7 @@ struct lat4d {
                     event_counter = 0;
                     meas_plaquette.emplace_back(plaq);
                     samples++;
+                    if (samples == N_samples) return meas_plaquette;
                     theta_parcouru_sample = 0;
                     if (poisson) theta_sample = random_theta_sample(rng); //On retire un nouveau theta_sample
                     theta_parcouru_refresh += theta_update;
@@ -1080,7 +1089,7 @@ struct lat4d {
     }
 };
 
-void compute_plaquette_loc_glob(int rank, int size, lat4d &lat, MPI_Comm comm) {
+void compute_plaquette_loc_glob(int rank, int size, lat4d &lat, MPI_Comm comm, std::vector<double> &meas) {
     int x0, xL;
     MPI_Cart_shift(comm, 0, 1, &x0, &xL);
     int y0, yL;
@@ -1100,10 +1109,11 @@ void compute_plaquette_loc_glob(int rank, int size, lat4d &lat, MPI_Comm comm) {
         g_plaquette /= size;
         //std::cout << "Plaquette moyenne locale : " << lat.local_mean_plaquette() << std::endl;
         std::cout << "<P> globale : " << g_plaquette << std::endl;
+        meas.emplace_back(g_plaquette);
     }
 }
 
-void in_main_MPI_Metropolis(int argc, char **argv) {
+void in_main_MPI_Metropolis(int argc, char **argv, int L, double beta, int n_shift_tot) {
     MPI_Init(&argc, &argv);
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -1139,7 +1149,6 @@ void in_main_MPI_Metropolis(int argc, char **argv) {
 
 
     //On crée une lattice dans chaque noeud
-    int L = 6;
     lat4d lat(L);
     //lat.hot_start(gen);
     lat.cold_start();
@@ -1148,9 +1157,8 @@ void in_main_MPI_Metropolis(int argc, char **argv) {
     }
 
     //Initial plaquette
-    compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+    //compute_plaquette_loc_glob(rank, size, lat, cart_comm);
     //Metropolis params
-    double beta = 6.0;
     size_t accepted = 0;
     size_t proposed = 0;
     int n_hits = 10;
@@ -1158,9 +1166,12 @@ void in_main_MPI_Metropolis(int argc, char **argv) {
     auto set = metropolis_set(0.15, 1000, gen);
     int n_shift = 1;
 
+    //Measures
+    std::vector<double> meas;
+
     //Metropolis boucle
     double start = MPI_Wtime();
-    for (int shift = 0; shift < 10*L; shift++) {
+    for (int shift = 0; shift < n_shift_tot; shift++) {
         //Calcul plaquette locale et globale
         for (int sweeps = 0; sweeps < n_sweeps; sweeps++) {
             lat.metropolis_sweep(beta, gen, set, accepted, proposed, n_hits);
@@ -1181,7 +1192,7 @@ void in_main_MPI_Metropolis(int argc, char **argv) {
         for (int sweeps = 0; sweeps < n_sweeps; sweeps++) {
             lat.metropolis_sweep(beta, gen, set, accepted, proposed, n_hits);
         }
-        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm, meas);
         lat.full_shift_n(n_shift,3, t0, tL, cart_comm);
         set = metropolis_set(0.15, 1000, gen);
     }
@@ -1192,12 +1203,17 @@ void in_main_MPI_Metropolis(int argc, char **argv) {
     MPI_Reduce(&elapsed, &elapsed_global, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if (rank==0) {
         std::cout << "Elapsed time : " << elapsed_global << "s" << std::endl;
+        std::ofstream file("mpi_metro_" + std::format("{:.0f}", beta) +".txt");
+        for (size_t i = 0; i < meas.size(); i++) {
+            file << meas[i] << " ";
+        }
+        file.close();
     }
 
     MPI_Finalize();
 }
 
-void in_main_MPI_ECMC(int argc, char **argv) {
+void in_main_MPI_ECMC(int argc, char **argv, int L, double beta, int n_shift_tot) {
     MPI_Init(&argc, &argv);
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -1233,7 +1249,6 @@ void in_main_MPI_ECMC(int argc, char **argv) {
 
 
     //On crée une lattice dans chaque noeud
-    int L = 10;
     lat4d lat(L);
     //lat.hot_start(gen);
     lat.cold_start();
@@ -1242,31 +1257,30 @@ void in_main_MPI_ECMC(int argc, char **argv) {
     }
 
     //Initial plaquette
-    compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+    //compute_plaquette_loc_glob(rank, size, lat, cart_comm);
+
+    //Measures
+    std::vector<double> meas;
 
     //ECMC params
-    double beta = 4.0;
-    int N_samples = 1000;
-    int param_theta_sample = 1000;
+    int N_samples = 100;
+    int param_theta_sample = 500;
     int param_theta_refresh = 200;
-    bool poisson = 0;
+    bool poisson = false;
     double epsilon_set = 0.15;
 
     //Boucle ECMC
     double start = MPI_Wtime();
-    for (int shift = 0; shift < 10*L; shift++) {
+    for (int shift = 0; shift < n_shift_tot; shift++) {
         lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
-        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
         lat.full_shift_n(1, 0, x0, xL, cart_comm);
         lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
-        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
         lat.full_shift_n(1, 1, y0, yL, cart_comm);
         lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
-        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
         lat.full_shift_n(1, 2, z0, zL, cart_comm);
         lat.ecmc_samples_improved(beta, N_samples, param_theta_sample, param_theta_refresh,gen, poisson, epsilon_set);
-        compute_plaquette_loc_glob(rank, size, lat, cart_comm);
         lat.full_shift_n(1, 3, t0, tL, cart_comm);
+        compute_plaquette_loc_glob(rank, size, lat, cart_comm,meas);
     }
     double end = MPI_Wtime();
     double elapsed = end - start;
@@ -1275,6 +1289,11 @@ void in_main_MPI_ECMC(int argc, char **argv) {
     MPI_Reduce(&elapsed, &elapsed_global, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if (rank==0) {
         std::cout << "Elapsed time : " << elapsed_global << "s" << std::endl;
+        std::ofstream file("mpi_ecmc_" + std::format("{:.0f}", beta) +".txt");
+        for (size_t i = 0; i < meas.size(); i++) {
+            file << meas[i] << " ";
+        }
+        file.close();
     }
     MPI_Finalize();
 }
@@ -1298,9 +1317,8 @@ void in_main_ECMC_debug() {
     std::cout << "<P> finale = " << lat.local_mean_plaquette() << std::endl;;
 }
 
-//TODO : Vérifier implémentation ECMC (shift validé par Metropolis) biais vient du lift ?
 //TODO : Vérifier ergodicité selon le shift et la taille de la lattice
 int main(int argc, char **argv) {
-    in_main_MPI_ECMC(argc, argv);
+    in_main_MPI_ECMC(argc, argv, 6, 6.0, 30);
     return 0;
 }

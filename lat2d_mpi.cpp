@@ -68,7 +68,7 @@ struct lat2d_mpi {
         }
     }
 
-    [[nodiscard]] int get_link(size_t site, int mu) const {
+    int get_link(size_t site, int mu) const {
         return links[2 * site + mu];
     }
 
@@ -80,7 +80,7 @@ struct lat2d_mpi {
         links[2 * site + mu] = value;
     }
 
-    [[nodiscard]] size_t index(int x, int y) const {
+    size_t index(int x, int y) const {
         if (x >= 1 && y >= 1 && x <= L - 2 && y <= L - 2) {
             //Le site est dans les liens actifs
             int xi = x - 1;
@@ -119,7 +119,7 @@ struct lat2d_mpi {
         return 1;
     }
 
-    std::string print_links() {
+    std::string print_links() const {
         std::string s;
         for (int y = L - 1; y >= 0; --y) {
             for (int x = 0; x < L; ++x) {
