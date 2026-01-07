@@ -263,7 +263,7 @@ struct lat4d {
     std::vector<Complex> halo_tL;
 
     //Utiles pour ECMC
-    std::vector<std::array<std::array<std::optional<size_t>, 2>,NDIMS> > neighbors; //Neighbors for all the possible sites of the lattice
+    std::vector<std::array<std::array<size_t, 2>,NDIMS>> neighbors; //Neighbors for all the possible sites of the lattice
     std::vector<std::array<bool,NDIMS> > frozen; //True if link is frozen, false if not
     std::vector<std::array<std::array<std::array<std::pair<std::optional<size_t>, int>, 3>, 6>, 4> > staples;
 
@@ -292,13 +292,21 @@ struct lat4d {
                     for (int t = 0; t < L; t++) {
                         size_t site_n = index(x, y, z, t);
                         if (x+1<=L-1) neighbors[site_n][0][0] = index(x + 1, y, z, t);
+                        else neighbors[site_n][0][0] = SIZE_MAX;
                         if (x-1>=0) neighbors[site_n][0][1] = index(x - 1, y, z, t);
+                        else neighbors[site_n][0][1] = SIZE_MAX;
                         if (y+1<=L-1) neighbors[site_n][1][0] = index(x, y + 1, z, t);
+                        else neighbors[site_n][1][0] = SIZE_MAX;
                         if (y-1>=0)neighbors[site_n][1][1] = index(x, y - 1, z, t);
+                        else neighbors[site_n][1][1] = SIZE_MAX;
                         if (z+1<=L-1)neighbors[site_n][2][0] = index(x, y, z + 1, t);
-                        if (z-1>=0)neighbors[site_n][2][1] = index(x, y, z - 1, t);
+                        else neighbors[site_n][2][0] = SIZE_MAX;
+                        if (z-1>=0) neighbors[site_n][2][1] = index(x, y, z - 1, t);
+                        else neighbors[site_n][2][1] = SIZE_MAX;
                         if (t+1<=L-1)neighbors[site_n][3][0] = index(x, y, z, t + 1);
+                        else neighbors[site_n][3][0] = SIZE_MAX;
                         if (t-1>=0)neighbors[site_n][3][1] = index(x, y, z, t - 1);
+                        else neighbors[site_n][3][1] = SIZE_MAX;
                     }
                 }
             }
@@ -327,10 +335,10 @@ struct lat4d {
                             for (int nu = 0; nu < NDIMS; nu++) {
                                 if (nu == mu) continue;
 
-                                size_t xmu = neighbors[site][mu][0].value(); //x+mu
-                                size_t xnu = neighbors[site][nu][0].value(); //x+nu
-                                size_t xmunu = neighbors[xmu][nu][1].value(); //x+mu-nu
-                                size_t xmnu = neighbors[site][nu][1].value(); //x-nu
+                                size_t xmu = neighbors[site][mu][0]; //x+mu
+                                size_t xnu = neighbors[site][nu][0]; //x+nu
+                                size_t xmunu = neighbors[xmu][nu][1]; //x+mu-nu
+                                size_t xmnu = neighbors[site][nu][1]; //x-nu
 
                                 staples[site][mu][j][0] = {xmu, nu};
                                 staples[site][mu][j][1] = {xnu, mu};
@@ -709,10 +717,10 @@ struct lat4d {
                 continue;
             }
             size_t x = site; //x
-            size_t xmu = neighbors[x][mu][0].value(); //x+mu
-            size_t xnu = neighbors[x][nu][0].value(); //x+nu
-            size_t xmunu = neighbors[xmu][nu][1].value(); //x+mu-nu
-            size_t xmnu = neighbors[x][nu][1].value(); //x-nu
+            size_t xmu = neighbors[x][mu][0]; //x+mu
+            size_t xnu = neighbors[x][nu][0]; //x+nu
+            size_t xmunu = neighbors[xmu][nu][1]; //x+mu-nu
+            size_t xmnu = neighbors[x][nu][1]; //x-nu
             auto U0 = view_link_const(xmu, nu);
             auto U1 = view_link_const(xnu, mu);
             auto U2 = view_link_const(x, nu);
@@ -1025,10 +1033,10 @@ struct lat4d {
                 continue;
             }
             size_t x = site; //x
-            size_t xmu = neighbors[x][mu][0].value(); //x+mu
-            size_t xnu = neighbors[x][nu][0].value(); //x+nu
-            size_t xmunu = neighbors[xmu][nu][1].value(); //x+mu-nu
-            size_t xmnu = neighbors[x][nu][1].value(); //x-nu
+            size_t xmu = neighbors[x][mu][0]; //x+mu
+            size_t xnu = neighbors[x][nu][0]; //x+nu
+            size_t xmunu = neighbors[xmu][nu][1]; //x+mu-nu
+            size_t xmnu = neighbors[x][nu][1]; //x-nu
             auto U0 = view_link_const(xmu, nu);
             auto U1 = view_link_const(xnu, mu);
             auto U2 = view_link_const(x, nu);
