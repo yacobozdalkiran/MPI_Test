@@ -1231,7 +1231,7 @@ void in_main_MPI_ECMC(int argc, char **argv, int L, double beta, int n_shift_tot
     std::mt19937_64 gen(rd()+rank);
 
     //Création de la topologie 4d
-    int dims[4] = {2, 2, 2, 2};
+    int dims[4] = {3, 3, 3, 3};
     int period[4] = {1, 1, 1, 1};
     int reorder = 1; //Autorise MPI a réordonner les rank pour optimiser
     MPI_Comm cart_comm;
